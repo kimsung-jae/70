@@ -16,8 +16,8 @@ public final class FlowCore {
     private FlowCore(){}
 
     public static final String API="https://api.bepick.io/game/bubble_ladder3";
-    public static final String PREF="bubble_autofind_v13";
-    public static final String ACTION_UPDATED="com.bubbleladder.autofindv13.FLOW_UPDATED";
+    public static final String PREF="bubble_tripick90_v14";
+    public static final String ACTION_UPDATED="com.bubbleladder.tripick90v14.FLOW_UPDATED";
     public static final int WINDOW=150;
     public static final double PICK_THRESHOLD=0.70;
 
@@ -81,6 +81,7 @@ public final class FlowCore {
         public String bestLabel="대기",date="",windowRange="",suffix="";
         public Backtest backtest;
         public Target70Engine.Result target70;
+        public TriPick90Engine.Result tri90;
     }
 
     public static final class SyncResult {
@@ -187,7 +188,7 @@ public final class FlowCore {
             stage="이전 픽 채점"; sp.edit().putString(K_LAST_STAGE,stage).apply();
             boolean resolved=resolvePending(c,merged);
             stage="로컬 저장"; sp.edit().putString(K_LAST_STAGE,stage).apply(); save(c,merged);
-            stage="AUTO FIND 방법 재탐색"; sp.edit().putString(K_LAST_STAGE,stage).apply(); Analysis a=analyze(merged);
+            stage="META90 방법 자동선택"; sp.edit().putString(K_LAST_STAGE,stage).apply(); Analysis a=analyze(merged);
             stage="다음 픽 저장"; sp.edit().putString(K_LAST_STAGE,stage).apply(); savePending(c,merged,a);
             sp.edit().putLong(K_LAST_SYNC,System.currentTimeMillis()).putInt(K_LAST_API_COUNT,api.size()).putString(K_LAST_STAGE,"완료").apply();
             SyncResult sr=new SyncResult(); sr.newRoundResolved=resolved||(!merged.isEmpty()&&merged.get(0).idx!=latestBefore); sr.analysis=a; sr.history=merged; return sr;
@@ -221,6 +222,7 @@ public final class FlowCore {
         try{a.suffix=suffixText(all,all.size(),8);}catch(Throwable ignored){a.suffix="-";}
         try{a.backtest=all.size()>=16?backtest(all):new Backtest();}catch(Throwable ignored){a.backtest=new Backtest();}
         try{a.target70=Target70Engine.optimize(all);}catch(Throwable e){a.target70=new Target70Engine.Result();a.target70.detail="자동탐색 엔진 보호모드 · "+safeErr(e);}
+        try{a.tri90=TriPick90Engine.optimize(all);}catch(Throwable e){a.tri90=new TriPick90Engine.Result();a.tri90.detail="삼치기90 엔진 보호모드 · "+safeErr(e);}
         if(a.target70!=null && a.target70.certified){
             a.bestDim=a.target70.dim; a.bestPick=a.target70.pick; a.bestConfidence=a.target70.validationRate; a.bestStrong=a.target70.targetAchieved || a.target70.validationRate>=0.70;
             a.bestLabel=DIM[a.bestDim]+" · "+sideLabel(DIM[a.bestDim],a.bestPick);
@@ -398,9 +400,19 @@ public final class FlowCore {
     }
 
     private static void savePending(Context c,List<Result>d,Analysis a){
-        if(d.isEmpty()||a==null||a.bestDim<0||a.bestPick==0)return;
+        if(d.isEmpty()||a==null)return;
         SharedPreferences sp=prefs(c); long next=nextIdx(d.get(0)); long existing=sp.getLong(K_PENDING_IDX,-1); if(existing==next)return;
         int stake=Math.max(5000,sp.getInt(K_BASE_STAKE,5000)); double odds=Math.max(1.01,sp.getFloat(K_ODDS,1.95f));
+        // META90: 90% 통과 여부와 별개로 매 회차 삼치기 제외 1개를 반드시 저장한다.
+        if(a.tri90!=null&&a.tri90.excludedCombo>=1&&a.tri90.excludedCombo<=4){
+            int ex=a.tri90.excludedCombo; double conf=a.tri90.validationRate;
+            String pick="삼치기 · 제외 "+COMBO[ex]+" · "+pct(conf);
+            sp.edit().putLong(K_PENDING_IDX,next).putInt(K_PENDING_DIM,3).putInt(K_PENDING_PICK,ex)
+                    .putFloat(K_PENDING_CONF,(float)conf).putInt(K_PENDING_STAKE,stake).putFloat(K_PENDING_ODDS,(float)odds)
+                    .putString(K_LAST_PICK,pick).putFloat(K_LAST_CONF,(float)conf).apply();
+            return;
+        }
+        if(a.bestDim<0||a.bestPick==0)return;
         String pick=a.bestLabel+" · "+pct(a.bestConfidence);
         sp.edit().putLong(K_PENDING_IDX,next).putInt(K_PENDING_DIM,a.bestDim).putInt(K_PENDING_PICK,a.bestPick)
                 .putFloat(K_PENDING_CONF,(float)a.bestConfidence).putInt(K_PENDING_STAKE,stake).putFloat(K_PENDING_ODDS,(float)odds)
@@ -409,9 +421,14 @@ public final class FlowCore {
 
     private static boolean resolvePending(Context c,List<Result>d){
         SharedPreferences sp=prefs(c); long idx=sp.getLong(K_PENDING_IDX,-1); int dim=sp.getInt(K_PENDING_DIM,-1),pick=sp.getInt(K_PENDING_PICK,0);
-        if(idx<=0||dim<0||dim>2||pick==0)return false;
+        if(idx<=0||dim<0||dim>3||pick==0)return false;
         Result actual=null; for(Result r:d)if(r.idx==idx){actual=r;break;} if(actual==null)return false;
-        boolean ok=vec(actual.combo,dim)==pick; int st=sp.getInt(K_PENDING_STAKE,5000); double o=sp.getFloat(K_PENDING_ODDS,1.95f); double pnl=ok?st*(o-1.0):-st;
+        boolean tri=(dim==3);
+        if(tri&&(pick<1||pick>4))return false;
+        boolean ok=tri?(actual.combo!=pick):(vec(actual.combo,dim)==pick);
+        int st=sp.getInt(K_PENDING_STAKE,5000); double o=sp.getFloat(K_PENDING_ODDS,1.95f);
+        // 삼치기는 사이트별 실제 배팅 조합/배당 계산이 다를 수 있어 승률만 채점하고 가상손익은 0으로 둔다.
+        double pnl=tri?0.0:(ok?st*(o-1.0):-st);
         int n=sp.getInt(K_LIVE_TOTAL,0)+1,hit=sp.getInt(K_LIVE_SUCCESS,0)+(ok?1:0); double old=Double.longBitsToDouble(sp.getLong(K_LIVE_PROFIT,Double.doubleToLongBits(0)));
         appendRecord(c,idx,dim,pick,sp.getFloat(K_PENDING_CONF,0.5f),actual.combo,ok,pnl);
         sp.edit().putInt(K_LIVE_TOTAL,n).putInt(K_LIVE_SUCCESS,hit).putLong(K_LIVE_PROFIT,Double.doubleToLongBits(old+pnl))
@@ -434,7 +451,7 @@ public final class FlowCore {
     public static void resetAll(Context c){ prefs(c).edit().clear().putBoolean(K_AUTO,false).putInt(K_BASE_STAKE,5000).putFloat(K_ODDS,1.95f).apply(); }
 
     public static JSONObject backup(Context c)throws Exception{
-        SharedPreferences sp=prefs(c); JSONObject root=new JSONObject(); root.put("format","BubbleAutoFindV13Backup");
+        SharedPreferences sp=prefs(c); JSONObject root=new JSONObject(); root.put("format","BubbleTriPick90V16Backup");
         root.put("history",new JSONArray(sp.getString(K_HISTORY,"[]"))); root.put("records",new JSONArray(sp.getString(K_RECORDS,"[]")));
         JSONObject st=new JSONObject(); st.put("liveTotal",sp.getInt(K_LIVE_TOTAL,0));st.put("liveHit",sp.getInt(K_LIVE_SUCCESS,0));st.put("liveProfit",sp.getLong(K_LIVE_PROFIT,Double.doubleToLongBits(0)));
         st.put("stake",sp.getInt(K_BASE_STAKE,5000));st.put("odds",sp.getFloat(K_ODDS,1.95f));st.put("auto",sp.getBoolean(K_AUTO,false));root.put("state",st); return root;
