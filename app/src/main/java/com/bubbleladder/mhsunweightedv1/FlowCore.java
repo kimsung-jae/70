@@ -16,8 +16,8 @@ public final class FlowCore {
     private FlowCore(){}
 
     public static final String API="https://api.bepick.io/game/bubble_ladder3";
-    public static final String PREF="bubble_target70_v12";
-    public static final String ACTION_UPDATED="com.bubbleladder.target70v12.FLOW_UPDATED";
+    public static final String PREF="bubble_autofind_v13";
+    public static final String ACTION_UPDATED="com.bubbleladder.autofindv13.FLOW_UPDATED";
     public static final int WINDOW=150;
     public static final double PICK_THRESHOLD=0.70;
 
@@ -187,7 +187,7 @@ public final class FlowCore {
             stage="이전 픽 채점"; sp.edit().putString(K_LAST_STAGE,stage).apply();
             boolean resolved=resolvePending(c,merged);
             stage="로컬 저장"; sp.edit().putString(K_LAST_STAGE,stage).apply(); save(c,merged);
-            stage="TARGET 70 규칙 합성/검증"; sp.edit().putString(K_LAST_STAGE,stage).apply(); Analysis a=analyze(merged);
+            stage="AUTO FIND 방법 재탐색"; sp.edit().putString(K_LAST_STAGE,stage).apply(); Analysis a=analyze(merged);
             stage="다음 픽 저장"; sp.edit().putString(K_LAST_STAGE,stage).apply(); savePending(c,merged,a);
             sp.edit().putLong(K_LAST_SYNC,System.currentTimeMillis()).putInt(K_LAST_API_COUNT,api.size()).putString(K_LAST_STAGE,"완료").apply();
             SyncResult sr=new SyncResult(); sr.newRoundResolved=resolved||(!merged.isEmpty()&&merged.get(0).idx!=latestBefore); sr.analysis=a; sr.history=merged; return sr;
@@ -220,12 +220,12 @@ public final class FlowCore {
         try{a.windowRange=rangeLabel(all,0,all.size());}catch(Throwable ignored){a.windowRange="-";}
         try{a.suffix=suffixText(all,all.size(),8);}catch(Throwable ignored){a.suffix="-";}
         try{a.backtest=all.size()>=16?backtest(all):new Backtest();}catch(Throwable ignored){a.backtest=new Backtest();}
-        try{a.target70=Target70Engine.optimize(all);}catch(Throwable e){a.target70=new Target70Engine.Result();a.target70.detail="70% 합성엔진 보호모드 · "+safeErr(e);}
+        try{a.target70=Target70Engine.optimize(all);}catch(Throwable e){a.target70=new Target70Engine.Result();a.target70.detail="자동탐색 엔진 보호모드 · "+safeErr(e);}
         if(a.target70!=null && a.target70.certified){
-            a.bestDim=a.target70.dim; a.bestPick=a.target70.pick; a.bestConfidence=a.target70.validationRate; a.bestStrong=true;
+            a.bestDim=a.target70.dim; a.bestPick=a.target70.pick; a.bestConfidence=a.target70.validationRate; a.bestStrong=a.target70.targetAchieved || a.target70.validationRate>=0.70;
             a.bestLabel=DIM[a.bestDim]+" · "+sideLabel(DIM[a.bestDim],a.bestPick);
         }else{
-            a.bestDim=-1; a.bestPick=0; a.bestConfidence=0.0; a.bestStrong=false; a.bestLabel="70% 목표 조합 생성 중";
+            a.bestDim=-1; a.bestPick=0; a.bestConfidence=0.0; a.bestStrong=false; a.bestLabel="자동탐색 준비중";
         }
         return a;
     }
@@ -434,7 +434,7 @@ public final class FlowCore {
     public static void resetAll(Context c){ prefs(c).edit().clear().putBoolean(K_AUTO,false).putInt(K_BASE_STAKE,5000).putFloat(K_ODDS,1.95f).apply(); }
 
     public static JSONObject backup(Context c)throws Exception{
-        SharedPreferences sp=prefs(c); JSONObject root=new JSONObject(); root.put("format","BubbleTarget70V12Backup");
+        SharedPreferences sp=prefs(c); JSONObject root=new JSONObject(); root.put("format","BubbleAutoFindV13Backup");
         root.put("history",new JSONArray(sp.getString(K_HISTORY,"[]"))); root.put("records",new JSONArray(sp.getString(K_RECORDS,"[]")));
         JSONObject st=new JSONObject(); st.put("liveTotal",sp.getInt(K_LIVE_TOTAL,0));st.put("liveHit",sp.getInt(K_LIVE_SUCCESS,0));st.put("liveProfit",sp.getLong(K_LIVE_PROFIT,Double.doubleToLongBits(0)));
         st.put("stake",sp.getInt(K_BASE_STAKE,5000));st.put("odds",sp.getFloat(K_ODDS,1.95f));st.put("auto",sp.getBoolean(K_AUTO,false));root.put("state",st); return root;

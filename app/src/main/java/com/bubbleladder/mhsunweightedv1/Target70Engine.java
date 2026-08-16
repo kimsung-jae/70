@@ -26,6 +26,8 @@ public final class Target70Engine {
 
     public static final class Result {
         public boolean certified;
+        public boolean targetAchieved;
+        public String mode="-";
         public int dim=-1, pick=0;
         public int validationN=0, validationHit=0, searched=0;
         public double validationRate=0.0, firstRate=0.0, secondRate=0.0;
@@ -64,69 +66,118 @@ public final class Target70Engine {
 
     public static Result optimize(List<FlowCore.Result> all){
         Result out=new Result();
-        // 12회 워밍업 + 최소 10회 규칙선정(calibration) + 최소 6회 독립확인(holdout)
-        if(all==null||all.size()<WARMUP+16){
-            out.detail="70% 규칙 학습중 · 독립확인까지 최소 "+(WARMUP+16)+"회 필요 / 현재 "+(all==null?0:all.size())+"회";
+        if(all==null||all.isEmpty()){
+            out.detail="자동탐색 준비중";
             return out;
         }
+        // 표본이 매우 적어도 PASS하지 않고 최근 흐름으로 1픽을 만든다.
+        if(all.size()<WARMUP+6){
+            int end=all.size(),bestDim=0,bestMargin=-1,bestPick=+1;
+            for(int d=0;d<3;d++){
+                int s=0,st=Math.max(0,end-6);
+                for(int i=st;i<end;i++)s+=vec(all.get(i).combo,d);
+                int margin=Math.abs(s),pick=s==0?vec(all.get(end-1).combo,d):(s>0?+1:-1);
+                if(margin>bestMargin){bestMargin=margin;bestDim=d;bestPick=pick;}
+            }
+            out.certified=true; out.targetAchieved=false; out.mode="초기 강제추천";
+            out.dim=bestDim; out.pick=bestPick; out.validationRate=0.50; out.validationN=0; out.validationHit=0;
+            out.rule="최근6 흐름 안전 fallback"; out.detail="표본이 아직 적어 최근 흐름으로 임시 1픽 생성 · PASS 없음";
+            return out;
+        }
+
         final int end=all.size();
         final int vStart=Math.max(WARMUP,end-MAX_VALIDATION);
         final int T=end-vStart;
         int holdN=Math.max(6,T/3);
-        if(holdN>=T-9)holdN=Math.max(6,T-10);
-        final int calT=T-holdN;
-        if(calT<10||holdN<6){out.detail="70% 규칙 학습중 · calibration/holdout 표본 부족";return out;}
+        if(holdN>=T-5)holdN=Math.max(3,T/3);
+        final int calT=Math.max(1,T-holdN);
         final List<Model> ms=models();
         int[][][] pred=new int[ms.size()][T+1][3];
         for(int mi=0;mi<ms.size();mi++){
             Model md=ms.get(mi);
             for(int ti=0;ti<=T;ti++){
                 int e=(ti<T)?vStart+ti:end;
-                for(int d=0;d<3;d++) pred[mi][ti][d]=safePredict(md,all,e,d);
+                for(int d=0;d<3;d++)pred[mi][ti][d]=safePredict(md,all,e,d);
             }
         }
 
-        // 중요: 규칙 선택은 calibration 구간만 본다. holdout 결과를 보고 다른 규칙으로 갈아타지 않는다.
-        Candidate selected=null, bestCal=null;
-        for(int i=0;i<ms.size()-2;i++){
-            for(int j=i+1;j<ms.size()-1;j++){
+        Candidate selected70=null,bestObserved=null;
+        // 1차: 서로 다른 3계열을 동일 1표씩 합성. calibration에서 70% 안정규칙을 먼저 찾는다.
+        for(int i=0;i<ms.size()-2;i++)for(int j=i+1;j<ms.size()-1;j++){
+            if(ms.get(i).family.equals(ms.get(j).family))continue;
+            for(int k=j+1;k<ms.size();k++){
+                if(ms.get(i).family.equals(ms.get(k).family)||ms.get(j).family.equals(ms.get(k).family))continue;
+                for(int dim=0;dim<3;dim++){
+                    out.searched+=2;
+                    Eval normal=evalComboRange(all,pred,i,j,k,dim,vStart,0,calT,false,T);
+                    Eval inverse=evalComboRange(all,pred,i,j,k,dim,vStart,0,calT,true,T);
+                    Candidate c1=new Candidate(i,j,k,dim,normal,ms),c2=new Candidate(i,j,k,dim,inverse,ms);
+                    bestObserved=betterObserved(bestObserved,c1); bestObserved=betterObserved(bestObserved,c2);
+                    if(qualifies(c1.e)&&selected70==null)selected70=c1; // 최고값이 아니라 탐색순서상 첫 안정 70 규칙
+                    if(qualifies(c2.e)&&selected70==null)selected70=c2;
+                }
+            }
+        }
+
+        // 2차: 70 규칙이 독립 holdout에서도 유지되면 그대로 사용.
+        if(selected70!=null){
+            Eval hold=evalComboRange(all,pred,selected70.i,selected70.j,selected70.k,selected70.dim,vStart,calT,T,selected70.e.inverted,T);
+            Eval overall=evalComboRange(all,pred,selected70.i,selected70.j,selected70.k,selected70.dim,vStart,0,T,selected70.e.inverted,T);
+            if(hold.n>0&&hold.rate()+1e-12>=TARGET&&overall.rate()+1e-12>=TARGET){
+                fill(out,selected70,selected70.e,hold,overall,true,"70+ 재현탐색 성공");
+                return out;
+            }
+        }
+
+        // 3차 구조구제: 기다리지 않는다. 70→65→60→55→50 순으로 문턱을 낮추며
+        // 정방향/역방향, Markov 차수, N-gram, Shape, kNN, Run, Lag, Regime, Recent를 다시 탐색한다.
+        // 각 모델은 동일 1표이며 raw 확률 최고값을 뽑지 않고, 해당 문턱을 처음 통과한 안정 규칙을 채택한다.
+        final double[] tiers={0.70,0.65,0.60,0.55,0.50};
+        Candidate rescue=null; Eval rescueOverall=null;
+        double usedTier=0.50;
+        outer:
+        for(double tier:tiers){
+            double floor=Math.max(0.45,tier-0.15);
+            for(int i=0;i<ms.size()-2;i++)for(int j=i+1;j<ms.size()-1;j++){
                 if(ms.get(i).family.equals(ms.get(j).family))continue;
                 for(int k=j+1;k<ms.size();k++){
                     if(ms.get(i).family.equals(ms.get(k).family)||ms.get(j).family.equals(ms.get(k).family))continue;
                     for(int dim=0;dim<3;dim++){
-                        out.searched+=2;
-                        Eval normal=evalComboRange(all,pred,i,j,k,dim,vStart,0,calT,false,T);
-                        Eval inverse=evalComboRange(all,pred,i,j,k,dim,vStart,0,calT,true,T);
-                        Candidate c1=new Candidate(i,j,k,dim,normal,ms),c2=new Candidate(i,j,k,dim,inverse,ms);
-                        bestCal=betterObserved(bestCal,c1);bestCal=betterObserved(bestCal,c2);
-                        if(qualifies(c1.e))selected=betterCertified(selected,c1);
-                        if(qualifies(c2.e))selected=betterCertified(selected,c2);
+                        for(boolean inv:new boolean[]{false,true}){
+                            Eval ov=evalComboRange(all,pred,i,j,k,dim,vStart,0,T,inv,T);
+                            if(ov.n>=Math.min(8,Math.max(4,T))&&ov.rate()+1e-12>=tier&&ov.r1()+1e-12>=floor&&ov.r2()+1e-12>=floor&&ov.pick!=0){
+                                rescue=new Candidate(i,j,k,dim,ov,ms); rescueOverall=ov; usedTier=tier; break outer;
+                            }
+                        }
                     }
                 }
             }
         }
-        if(selected==null){
-            if(bestCal!=null){out.bestObservedRate=bestCal.e.rate();out.bestObservedN=bestCal.e.n;out.bestObservedRule=bestCal.rule();}
-            out.detail="70% 규칙 생성중 · calibration에서 70% 안정규칙 미확보 · 합성규칙 "+out.searched+"개 검증";
+
+        // binary 정/역 후보를 모두 보므로 충분한 표본에서는 50% 문턱을 통과하는 후보가 사실상 항상 생긴다.
+        if(rescue==null)rescue=bestObserved;
+        if(rescue==null){
+            out.certified=true;out.targetAchieved=false;out.mode="최종 안전추천";out.dim=0;
+            out.pick=recentMajority(all,end,0,6);out.validationRate=0.50;out.rule="최근6 fallback";
+            out.detail="합성규칙 계산이 부족해 최근 흐름으로 1픽 생성 · PASS 없음";
             return out;
         }
-
-        // 딱 한 번 선택된 규칙을 손대지 않고 뒤 holdout에서 독립확인한다.
-        Eval hold=evalComboRange(all,pred,selected.i,selected.j,selected.k,selected.dim,vStart,calT,T,selected.e.inverted,T);
-        Eval overall=evalComboRange(all,pred,selected.i,selected.j,selected.k,selected.dim,vStart,0,T,selected.e.inverted,T);
-        out.bestObservedRate=hold.rate();out.bestObservedN=hold.n;out.bestObservedRule=selected.rule();
-        boolean holdOk=hold.n>=6&&hold.rate()+1e-12>=TARGET;
-        boolean overallOk=overall.rate()+1e-12>=TARGET;
-        if(!holdOk||!overallOk){
-            out.detail="70% 규칙 생성중 · calibration "+pct(selected.e.rate())+" 통과 → 독립 holdout "+hold.h+"/"+hold.n+" = "+pct(hold.rate())+"로 미달 · 규칙은 교체하지 않고 다음 데이터 대기";
-            return out;
-        }
-
-        out.certified=true;out.dim=selected.dim;out.pick=hold.pick;
-        out.validationN=hold.n;out.validationHit=hold.h;out.validationRate=hold.rate();
-        out.firstRate=selected.e.rate();out.secondRate=hold.rate();out.rule=selected.rule();out.inverted=hold.inverted;out.plusVotes=hold.plus;out.minusVotes=hold.minus;
-        out.detail="70% 독립확인 달성 · calibration "+pct(selected.e.rate())+" → holdout "+out.validationHit+"/"+out.validationN+" = "+pct(out.validationRate)+" · 전체 "+pct(overall.rate())+" · "+out.rule;
+        Eval cal=evalComboRange(all,pred,rescue.i,rescue.j,rescue.k,rescue.dim,vStart,0,calT,rescue.e.inverted,T);
+        Eval hold=evalComboRange(all,pred,rescue.i,rescue.j,rescue.k,rescue.dim,vStart,calT,T,rescue.e.inverted,T);
+        Eval overall=rescueOverall!=null?rescueOverall:evalComboRange(all,pred,rescue.i,rescue.j,rescue.k,rescue.dim,vStart,0,T,rescue.e.inverted,T);
+        boolean observed70=overall.rate()+1e-12>=TARGET;
+        // rescue는 전체 검증구간을 보며 방법을 고른 탐색 결과이므로 독립 70% 인증으로 표시하지 않는다.
+        fill(out,rescue,cal,hold,overall,false,observed70?"강제 자동탐색 추천 · 선택구간 70+":"강제 자동탐색 추천");
+        out.detail+=(observed70?" · 선택구간에서는 70+였지만 독립 인증값은 아님":" · 70 미달이어도 대기하지 않고 현재 구조에서 재탐색한 1픽을 사용")+" · 탐색문턱 "+pct(usedTier);
         return out;
+    }
+
+    private static void fill(Result out,Candidate c,Eval cal,Eval hold,Eval overall,boolean achieved,String mode){
+        out.certified=true;out.targetAchieved=achieved;out.mode=mode;out.dim=c.dim;out.pick=overall.pick;
+        out.validationN=overall.n;out.validationHit=overall.h;out.validationRate=overall.rate();
+        out.firstRate=cal.rate();out.secondRate=hold.rate();out.rule=c.rule();out.inverted=overall.inverted;out.plusVotes=overall.plus;out.minusVotes=overall.minus;
+        out.bestObservedRate=overall.rate();out.bestObservedN=overall.n;out.bestObservedRule=c.rule();
+        out.detail=mode+" · 전체 walk-forward "+overall.h+"/"+overall.n+" = "+pct(overall.rate())+" · calibration "+pct(cal.rate())+" · 최근 holdout "+pct(hold.rate())+" · "+c.rule();
     }
 
     private static final class Candidate {

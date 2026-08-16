@@ -5,11 +5,11 @@ android {
     compileSdk 35
 
     defaultConfig {
-        applicationId 'com.bubbleladder.target70v12'
+        applicationId 'com.bubbleladder.autofindv13'
         minSdk 26
         targetSdk 35
-        versionCode 12
-        versionName '1.2'
+        versionCode 13
+        versionName '1.3'
     }
 
     compileOptions {

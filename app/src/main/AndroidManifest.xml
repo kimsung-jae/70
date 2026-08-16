@@ -8,7 +8,7 @@
     <application
         android:allowBackup="true"
         android:usesCleartextTraffic="false"
-        android:label="보글사다리 TARGET 70 V1.2"
+        android:label="보글사다리 AUTO FIND V1.3"
         android:theme="@style/AppTheme">
         <activity
             android:name="com.bubbleladder.mhsunweightedv1.MainActivity"
