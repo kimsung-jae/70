@@ -1,0 +1,19 @@
+plugins { id 'com.android.application' }
+
+android {
+    namespace 'com.bubbleladder.mhsunweightedv1'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'com.bubbleladder.target70v12'
+        minSdk 26
+        targetSdk 35
+        versionCode 12
+        versionName '1.2'
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
